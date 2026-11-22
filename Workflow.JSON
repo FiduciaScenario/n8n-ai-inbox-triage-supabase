@@ -1,0 +1,316 @@
+{
+  "name": "08_RealTime_AI_Inbox_Triage",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "inbound-triage",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.2,
+      "position": [
+        -208,
+        16
+      ],
+      "id": "b924d34e-3e38-4ac6-96dd-67b71f3724b2",
+      "name": "Webhook",
+      "webhookId": "5ec91ae4-b729-435d-b2af-2f8c859f516b"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Obsługa zarówno danych z body (POST), jak i płaskiego JSON-a testowego\nconst payload = $input.item.json.body || $input.item.json;\n\nconst rawEmail = (payload.sender_email || \"\").trim().toLowerCase();\nconst rawMessage = (payload.message || \"\").toString();\n\n// 1. Walidacja wejścia\nif (!rawEmail || !rawEmail.includes(\"@\")) {\n  throw new Error(\"Brak poprawnego adresu e-mail w payloadzie.\");\n}\n\n// 2. Czyszczenie tekstu z tagów HTML, nadmiarowych spacji i pustych linii (Regex)\nconst cleanMessage = rawMessage\n  .replace(/<[^>]*>?/gm, \" \")\n  .replace(/\\s+/g, \" \")\n  .trim();\n\n// 3. Wyciągnięcie domeny i sprawdzenie, czy to domena firmowa\nconst freeProviders = [\"gmail.com\", \"wp.pl\", \"onet.pl\", \"o2.pl\", \"interia.pl\", \"yahoo.com\", \"outlook.com\", \"icloud.com\"];\nconst companyDomain = rawEmail.split(\"@\")[1] || \"\";\nconst isBusinessEmail = !freeProviders.includes(companyDomain);\n\n// 4. Deterministyczny hash (idempotencja pod kolumnę message_hash UNIQUE w Supabase)\nconst hashSource = `${rawEmail}|${cleanMessage.toLowerCase().slice(0, 200)}`;\nlet hash = 2166136261;\nfor (let i = 0; i < hashSource.length; i++) {\n  hash ^= hashSource.charCodeAt(i);\n  hash = Math.imul(hash, 16777619);\n}\nconst messageHash = \"lead_\" + (hash >>> 0).toString(16).padStart(8, \"0\");\n\nreturn {\n  json: {\n    message_hash: messageHash,\n    sender_email: rawEmail,\n    company_domain: companyDomain,\n    is_business_email: isBusinessEmail,\n    clean_message: cleanMessage,\n    received_at: new Date().toISOString()\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        16,
+        16
+      ],
+      "id": "ddb2e941-9797-44a9-9ef0-fb56d9010457",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Przeanalizuj poniższą wiadomość przychodzącą od klienta B2B:\n\nNadawca: {{ $json.sender_email }}\nDomena: {{ $json.company_domain }} (Firmowy e-mail: {{ $json.is_business_email }})\nTreść wiadomości: {{ $json.clean_message }}",
+        "hasOutputParser": true,
+        "messages": {
+          "messageValues": [
+            {
+              "message": "You are a B2B lead qualification engineer (AI Inbox Triage). Analyze the incoming message and return data strictly matching the JSON schema.  Rules: - intent: strictly one of \"sales_lead\", \"support\", or \"spam\". - lead_score: integer 0-100 (75-100 for businesses with a clear pain point, urgency, or budget; 0-30 for spam). - urgency: strictly \"high\", \"medium\", or \"low\". - detected_pain_point: 1 concise sentence in the sender's language describing the core business problem. - draft_reply: short, professional reply in the sender's language proposing a 15-minute demo."
+            }
+          ]
+        },
+        "batching": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.9,
+      "position": [
+        240,
+        16
+      ],
+      "id": "d74cf252-a58a-4179-9e32-98eaf2fc0ebc",
+      "name": "Basic LLM Chain"
+    },
+    {
+      "parameters": {
+        "jsonSchemaExample": "{\n  \"intent\": \"sales_lead\",\n  \"lead_score\": 90,\n  \"urgency\": \"high\",\n  \"detected_pain_point\": \"Utrata ok. 30% leadów przez ręczne przepisywanie formularzy.\",\n  \"draft_reply\": \"Cześć Marcin, dzięki za wiadomość...\"\n}"
+      },
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        416,
+        224
+      ],
+      "id": "eaf8c645-6a29-4ff5-a6c0-b11f018e1a0f",
+      "name": "Structured Output Parser"
+    },
+    {
+      "parameters": {
+        "modelName": "models/gemini-3.1-flash-lite",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1.2,
+      "position": [
+        224,
+        224
+      ],
+      "id": "e5821915-5e4e-4ccd-af95-5dbe702d270e",
+      "name": "Google Gemini Chat Model",
+      "credentials": {
+        "googlePalmApi": {
+          "id": "xXJH2HMzFeScAiX0",
+          "name": "Google Gemini(PaLM) Api account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "tableId": "inbound_leads",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "message_hash",
+              "fieldValue": "={{ $('Code in JavaScript').item.json.message_hash }}"
+            },
+            {
+              "fieldId": "sender_email",
+              "fieldValue": "={{ $('Code in JavaScript').item.json.sender_email }}"
+            },
+            {
+              "fieldId": "company_domain",
+              "fieldValue": "={{ $('Code in JavaScript').item.json.company_domain }}"
+            },
+            {
+              "fieldId": "raw_message",
+              "fieldValue": "={{ $('Code in JavaScript').item.json.clean_message }}"
+            },
+            {
+              "fieldId": "intent",
+              "fieldValue": "={{ $json.output.intent }}"
+            },
+            {
+              "fieldId": "lead_score",
+              "fieldValue": "={{ $json.output.lead_score }}"
+            },
+            {
+              "fieldId": "urgency",
+              "fieldValue": "={{ $json.output.urgency }}"
+            },
+            {
+              "fieldId": "detected_pain_point",
+              "fieldValue": "={{ $json.output.detected_pain_point }}"
+            },
+            {
+              "fieldId": "draft_reply",
+              "fieldValue": "={{ $json.output.draft_reply }}"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        592,
+        16
+      ],
+      "id": "bcd86c88-8807-4852-9013-ba2db963b76c",
+      "name": "Create a row",
+      "credentials": {
+        "supabaseApi": {
+          "id": "WDhD64YDRG0AbXQ9",
+          "name": "Supabase account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 4
+          },
+          "conditions": [
+            {
+              "id": "a37eae48-3491-4a3f-b07b-72995cca681c",
+              "leftValue": "={{ $('Basic LLM Chain').item.json.output.lead_score }}",
+              "rightValue": 70,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.4,
+      "position": [
+        816,
+        16
+      ],
+      "id": "6b6b58a6-27e2-48bb-a0aa-00e9c4f80467",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "resource": "draft",
+        "subject": "=Re: Automating your lead pipeline – {{ $json.company_domain }}",
+        "message": "={{ $json.draft_reply }}",
+        "options": {
+          "sendTo": "={{ $json.sender_email }}"
+        }
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        1040,
+        16
+      ],
+      "id": "9c23181e-d8cb-4b80-8af0-9fdbd872d293",
+      "name": "Create a draft",
+      "webhookId": "113b3d17-5034-4670-9d23-9867f41d762a",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "xIPOAsr04X6IaHeD",
+          "name": "Gmail account"
+        }
+      }
+    }
+  ],
+  "pinData": {
+    "Webhook": [
+      {
+        "json": {
+          "body": {
+            "sender_email": "David.Miller@FreightScale.io",
+            "message": "<p>Hi, we are losing around 30% of inbound web leads because our sales reps manually copy them into spreadsheets. We urgently need an automated pipeline with a database and instant draft replies. Budget is approved for this month.</p>"
+          }
+        }
+      }
+    ]
+  },
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Basic LLM Chain",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Structured Output Parser": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "Basic LLM Chain",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Gemini Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Basic LLM Chain",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Basic LLM Chain": {
+      "main": [
+        [
+          {
+            "node": "Create a row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create a row": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "Create a draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "timeSavedMode": "fixed",
+    "errorWorkflow": "lTK2s3VFpookmM1k",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  },
+  "versionId": "41b9f6f4-c3f9-4f26-887a-cdc5c2ac2fb1",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "72c8eabe7804f39cd7e58bae2c3fb053054abde2acff93fb202ed190b110da9c"
+  },
+  "nodeGroups": [],
+  "id": "u0Juy8S9HlEuX3Yy",
+  "tags": []
+}
